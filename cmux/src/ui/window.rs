@@ -6,6 +6,7 @@ use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 use tokio::sync::mpsc::UnboundedReceiver;
+use vte4::prelude::*;
 
 use crate::app::{lock_or_recover, AppState, UiEvent};
 use crate::model::panel::SplitOrientation;
@@ -49,62 +50,354 @@ pub fn create_window(
     bind_sidebar_selection(&list_box, &content_box, state);
     bind_shared_state_updates(&list_box, &content_box, state, ui_events);
 
+    // --- Actions ---
+    install_actions(&window, app, state, &list_box, &content_box);
+
+    // --- Header bar ---
     let header = adw::HeaderBar::new();
 
     let new_ws_btn = gtk4::Button::from_icon_name("tab-new-symbolic");
-    new_ws_btn.set_tooltip_text(Some("New Workspace"));
-    {
-        let state = state.clone();
-        let list_box = list_box.clone();
-        let content_box = content_box.clone();
-        new_ws_btn.connect_clicked(move |_| {
-            let workspace = Workspace::new();
-            lock_or_recover(&state.shared.tab_manager).add_workspace(workspace);
-            refresh_ui(&list_box, &content_box, &state);
-        });
-    }
+    new_ws_btn.set_tooltip_text(Some("New Workspace (Ctrl+Shift+T)"));
+    new_ws_btn.set_action_name(Some("win.new-workspace"));
     header.pack_start(&new_ws_btn);
 
     let split_h_btn = gtk4::Button::from_icon_name("view-dual-symbolic");
-    split_h_btn.set_tooltip_text(Some("Split Horizontal"));
-    {
-        let state = state.clone();
-        let list_box = list_box.clone();
-        let content_box = content_box.clone();
-        split_h_btn.connect_clicked(move |_| {
-            if let Some(workspace) = lock_or_recover(&state.shared.tab_manager).selected_mut() {
-                workspace.split(SplitOrientation::Horizontal, PanelType::Terminal);
-            }
-            refresh_ui(&list_box, &content_box, &state);
-        });
-    }
+    split_h_btn.set_tooltip_text(Some("Split Right (Ctrl+Shift+D)"));
+    split_h_btn.set_action_name(Some("win.split-right"));
     header.pack_start(&split_h_btn);
 
     let split_v_btn = gtk4::Button::from_icon_name("view-paged-symbolic");
-    split_v_btn.set_tooltip_text(Some("Split Vertical"));
-    {
-        let state = state.clone();
-        let list_box = list_box.clone();
-        let content_box = content_box.clone();
-        split_v_btn.connect_clicked(move |_| {
-            if let Some(workspace) = lock_or_recover(&state.shared.tab_manager).selected_mut() {
-                workspace.split(SplitOrientation::Vertical, PanelType::Terminal);
-            }
-            refresh_ui(&list_box, &content_box, &state);
-        });
-    }
+    split_v_btn.set_tooltip_text(Some("Split Down (Ctrl+Shift+E)"));
+    split_v_btn.set_action_name(Some("win.split-down"));
     header.pack_start(&split_v_btn);
+
+    // Hamburger menu
+    let menu = build_app_menu();
+    let menu_btn = gtk4::MenuButton::new();
+    menu_btn.set_icon_name("open-menu-symbolic");
+    menu_btn.set_menu_model(Some(&menu));
+    menu_btn.set_tooltip_text(Some("Menu"));
+    header.pack_end(&menu_btn);
 
     let outer_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     outer_box.append(&header);
     outer_box.append(&split_view);
 
     window.set_content(Some(&outer_box));
-    setup_shortcuts(&window, state, &list_box, &content_box);
 
     // VTE terminals handle focus natively via GTK
 
     window
+}
+
+/// Build the hamburger menu model.
+fn build_app_menu() -> gio::Menu {
+    let menu = gio::Menu::new();
+
+    // Workspaces section
+    let ws_section = gio::Menu::new();
+    ws_section.append(Some("New Workspace"), Some("win.new-workspace"));
+    ws_section.append(Some("Close Workspace"), Some("win.close-workspace"));
+    ws_section.append(Some("Rename Workspace"), Some("win.rename-workspace"));
+    menu.append_section(Some("Workspaces"), &ws_section);
+
+    // Panes section
+    let pane_section = gio::Menu::new();
+    pane_section.append(Some("Split Right"), Some("win.split-right"));
+    pane_section.append(Some("Split Down"), Some("win.split-down"));
+    pane_section.append(Some("Close Pane"), Some("win.close-pane"));
+    menu.append_section(Some("Panes"), &pane_section);
+
+    // Terminal section
+    let term_section = gio::Menu::new();
+    term_section.append(Some("Copy"), Some("win.copy"));
+    term_section.append(Some("Paste"), Some("win.paste"));
+    term_section.append(Some("Increase Font Size"), Some("win.font-increase"));
+    term_section.append(Some("Decrease Font Size"), Some("win.font-decrease"));
+    term_section.append(Some("Reset Font Size"), Some("win.font-reset"));
+    menu.append_section(Some("Terminal"), &term_section);
+
+    // Notifications section
+    let notif_section = gio::Menu::new();
+    notif_section.append(Some("Jump to Latest Unread"), Some("win.jump-unread"));
+    menu.append_section(Some("Notifications"), &notif_section);
+
+    // App section
+    let app_section = gio::Menu::new();
+    app_section.append(Some("About cmux"), Some("win.about"));
+    app_section.append(Some("Quit"), Some("app.quit"));
+    menu.append_section(None, &app_section);
+
+    menu
+}
+
+/// Install all window actions with keyboard accelerators.
+fn install_actions(
+    window: &adw::ApplicationWindow,
+    app: &adw::Application,
+    state: &Rc<AppState>,
+    list_box: &gtk4::ListBox,
+    content_box: &gtk4::Box,
+) {
+    use gio::SimpleAction;
+
+    // Helper macro to reduce boilerplate
+    macro_rules! add_action {
+        ($name:expr, $accel:expr, $body:expr) => {{
+            let action = SimpleAction::new($name, None);
+            let s = state.clone();
+            let lb = list_box.clone();
+            let cb = content_box.clone();
+            action.connect_activate(move |_, _| {
+                ($body)(&s, &lb, &cb);
+            });
+            window.add_action(&action);
+            if !$accel.is_empty() {
+                app.set_accels_for_action(&format!("win.{}", $name), &[$accel]);
+            }
+        }};
+    }
+
+    // --- Workspace actions ---
+    add_action!("new-workspace", "<Ctrl><Shift>t", |state: &Rc<AppState>, lb: &gtk4::ListBox, cb: &gtk4::Box| {
+        let workspace = Workspace::new();
+        lock_or_recover(&state.shared.tab_manager).add_workspace(workspace);
+        refresh_ui(lb, cb, state);
+    });
+
+    add_action!("close-workspace", "<Ctrl><Shift>w", |state: &Rc<AppState>, lb: &gtk4::ListBox, cb: &gtk4::Box| {
+        let mut tab_manager = lock_or_recover(&state.shared.tab_manager);
+        if let Some(index) = tab_manager.selected_index() {
+            tab_manager.remove(index);
+        }
+        drop(tab_manager);
+        refresh_ui(lb, cb, state);
+    });
+
+    add_action!("close-pane", "<Ctrl>w", |state: &Rc<AppState>, lb: &gtk4::ListBox, cb: &gtk4::Box| {
+        let panel_id = {
+            let tab_manager = lock_or_recover(&state.shared.tab_manager);
+            tab_manager.selected().and_then(|ws| ws.focused_panel_id)
+        };
+        if let Some(panel_id) = panel_id {
+            state.close_panel(panel_id, true);
+            refresh_ui(lb, cb, state);
+        }
+    });
+
+    // Rename workspace (opens a dialog)
+    {
+        let action = SimpleAction::new("rename-workspace", None);
+        let s = state.clone();
+        let lb = list_box.clone();
+        let cb = content_box.clone();
+        let w = window.clone();
+        action.connect_activate(move |_, _| {
+            show_rename_dialog(&w, &s, &lb, &cb);
+        });
+        window.add_action(&action);
+        app.set_accels_for_action("win.rename-workspace", &["<Ctrl><Shift>r"]);
+    }
+
+    // --- Split actions ---
+    add_action!("split-right", "<Ctrl><Shift>d", |state: &Rc<AppState>, lb: &gtk4::ListBox, cb: &gtk4::Box| {
+        if let Some(workspace) = lock_or_recover(&state.shared.tab_manager).selected_mut() {
+            workspace.split(SplitOrientation::Horizontal, PanelType::Terminal);
+        }
+        refresh_ui(lb, cb, state);
+    });
+
+    add_action!("split-down", "<Ctrl><Shift>e", |state: &Rc<AppState>, lb: &gtk4::ListBox, cb: &gtk4::Box| {
+        if let Some(workspace) = lock_or_recover(&state.shared.tab_manager).selected_mut() {
+            workspace.split(SplitOrientation::Vertical, PanelType::Terminal);
+        }
+        refresh_ui(lb, cb, state);
+    });
+
+    // --- Terminal actions (operate on focused VTE terminal) ---
+    {
+        let action = SimpleAction::new("copy", None);
+        let s = state.clone();
+        action.connect_activate(move |_, _| {
+            if let Some(term) = get_focused_terminal(&s) {
+                term.copy_clipboard_format(vte4::Format::Text);
+            }
+        });
+        window.add_action(&action);
+        app.set_accels_for_action("win.copy", &["<Ctrl><Shift>c"]);
+    }
+
+    {
+        let action = SimpleAction::new("paste", None);
+        let s = state.clone();
+        action.connect_activate(move |_, _| {
+            if let Some(term) = get_focused_terminal(&s) {
+                term.paste_clipboard();
+            }
+        });
+        window.add_action(&action);
+        app.set_accels_for_action("win.paste", &["<Ctrl><Shift>v"]);
+    }
+
+    {
+        let action = SimpleAction::new("font-increase", None);
+        let s = state.clone();
+        action.connect_activate(move |_, _| {
+            change_font_scale(&s, 0.1);
+        });
+        window.add_action(&action);
+        app.set_accels_for_action("win.font-increase", &["<Ctrl>plus", "<Ctrl>equal"]);
+    }
+
+    {
+        let action = SimpleAction::new("font-decrease", None);
+        let s = state.clone();
+        action.connect_activate(move |_, _| {
+            change_font_scale(&s, -0.1);
+        });
+        window.add_action(&action);
+        app.set_accels_for_action("win.font-decrease", &["<Ctrl>minus"]);
+    }
+
+    {
+        let action = SimpleAction::new("font-reset", None);
+        let s = state.clone();
+        action.connect_activate(move |_, _| {
+            for terminal in s.terminal_cache.borrow().values() {
+                terminal.set_font_scale(1.0);
+            }
+        });
+        window.add_action(&action);
+        app.set_accels_for_action("win.font-reset", &["<Ctrl>0"]);
+    }
+
+    // --- Notifications ---
+    add_action!("jump-unread", "<Ctrl><Shift>u", |state: &Rc<AppState>, lb: &gtk4::ListBox, cb: &gtk4::Box| {
+        if select_latest_unread(state) {
+            refresh_ui(lb, cb, state);
+        }
+    });
+
+    // --- Workspace jump (Ctrl+1-9) ---
+    for i in 1..=9u32 {
+        let action_name = format!("jump-workspace-{}", i);
+        let action = SimpleAction::new(&action_name, None);
+        let s = state.clone();
+        let lb = list_box.clone();
+        let cb = content_box.clone();
+        let index = if i == 9 { usize::MAX } else { (i - 1) as usize };
+        action.connect_activate(move |_, _| {
+            let target = if index == usize::MAX {
+                // Jump to last workspace
+                let tab_manager = lock_or_recover(&s.shared.tab_manager);
+                let len = tab_manager.len();
+                if len > 0 { len - 1 } else { return; }
+            } else {
+                index
+            };
+            if select_workspace_by_index(&s, target) {
+                refresh_ui(&lb, &cb, &s);
+            }
+        });
+        window.add_action(&action);
+        app.set_accels_for_action(
+            &format!("win.jump-workspace-{}", i),
+            &[&format!("<Alt>{}", i)],
+        );
+    }
+
+    // --- About ---
+    {
+        let action = SimpleAction::new("about", None);
+        let w = window.clone();
+        action.connect_activate(move |_, _| {
+            let about = adw::AboutDialog::builder()
+                .application_name("cmux")
+                .version("0.1.0")
+                .developer_name("LucasPC-hub")
+                .license_type(gtk4::License::Agpl30)
+                .website("https://github.com/LucasPC-hub/cmux-linux")
+                .issue_url("https://github.com/LucasPC-hub/cmux-linux/issues")
+                .comments("Terminal multiplexer for AI coding agents.\nLinux/VTE fork of cmux by Manaflow.")
+                .build();
+            about.present(Some(&w));
+        });
+        window.add_action(&action);
+    }
+
+    // --- App quit ---
+    {
+        let action = SimpleAction::new("quit", None);
+        let a = app.clone();
+        action.connect_activate(move |_, _| {
+            a.quit();
+        });
+        app.add_action(&action);
+        app.set_accels_for_action("app.quit", &["<Ctrl>q"]);
+    }
+}
+
+fn get_focused_terminal(state: &Rc<AppState>) -> Option<vte4::Terminal> {
+    let panel_id = {
+        let tab_manager = lock_or_recover(&state.shared.tab_manager);
+        tab_manager.selected().and_then(|ws| ws.focused_panel_id)
+    }?;
+    state.terminal_cache.borrow().get(&panel_id).cloned()
+}
+
+fn change_font_scale(state: &Rc<AppState>, delta: f64) {
+    for terminal in state.terminal_cache.borrow().values() {
+        let current = terminal.font_scale();
+        let new_scale = (current + delta).clamp(0.5, 3.0);
+        terminal.set_font_scale(new_scale);
+    }
+}
+
+fn show_rename_dialog(
+    window: &adw::ApplicationWindow,
+    state: &Rc<AppState>,
+    list_box: &gtk4::ListBox,
+    content_box: &gtk4::Box,
+) {
+    let current_title = {
+        let tab_manager = lock_or_recover(&state.shared.tab_manager);
+        tab_manager.selected().map(|ws| ws.display_title().to_string())
+    };
+    let Some(current_title) = current_title else { return; };
+
+    let dialog = adw::AlertDialog::builder()
+        .heading("Rename Workspace")
+        .close_response("cancel")
+        .default_response("rename")
+        .build();
+
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("rename", "Rename");
+    dialog.set_response_appearance("rename", adw::ResponseAppearance::Suggested);
+
+    let entry = gtk4::Entry::new();
+    entry.set_text(&current_title);
+    entry.set_activates_default(true);
+    dialog.set_extra_child(Some(&entry));
+
+    let s = state.clone();
+    let lb = list_box.clone();
+    let cb = content_box.clone();
+    dialog.connect_response(None, move |_dialog, response| {
+        if response == "rename" {
+            let new_title = entry.text().to_string();
+            if !new_title.is_empty() {
+                let mut tab_manager = lock_or_recover(&s.shared.tab_manager);
+                if let Some(ws) = tab_manager.selected_mut() {
+                    ws.custom_title = Some(new_title);
+                }
+                drop(tab_manager);
+                refresh_ui(&lb, &cb, &s);
+            }
+        }
+    });
+
+    dialog.present(Some(window));
 }
 
 /// Rebuild the content area from the current workspace layout.
@@ -244,65 +537,6 @@ fn mark_workspace_read(state: &Rc<AppState>, workspace_id: uuid::Uuid) {
     {
         workspace.mark_notifications_read();
     }
-}
-
-fn setup_shortcuts(
-    window: &adw::ApplicationWindow,
-    state: &Rc<AppState>,
-    list_box: &gtk4::ListBox,
-    content_box: &gtk4::Box,
-) {
-    let controller = gtk4::EventControllerKey::new();
-
-    let state = state.clone();
-    let list_box = list_box.clone();
-    let content_box = content_box.clone();
-
-    controller.connect_key_pressed(move |_controller, keyval, _keycode, modifier| {
-        let ctrl = modifier.contains(gdk4::ModifierType::CONTROL_MASK);
-        let shift = modifier.contains(gdk4::ModifierType::SHIFT_MASK);
-
-        match (keyval, ctrl, shift) {
-            (gdk4::Key::T, true, true) => {
-                let workspace = Workspace::new();
-                lock_or_recover(&state.shared.tab_manager).add_workspace(workspace);
-                refresh_ui(&list_box, &content_box, &state);
-                glib::Propagation::Stop
-            }
-            (gdk4::Key::W, true, true) => {
-                let mut tab_manager = lock_or_recover(&state.shared.tab_manager);
-                if let Some(index) = tab_manager.selected_index() {
-                    tab_manager.remove(index);
-                }
-                drop(tab_manager);
-                refresh_ui(&list_box, &content_box, &state);
-                glib::Propagation::Stop
-            }
-            (gdk4::Key::D, true, true) => {
-                if let Some(workspace) = lock_or_recover(&state.shared.tab_manager).selected_mut() {
-                    workspace.split(SplitOrientation::Horizontal, PanelType::Terminal);
-                }
-                refresh_ui(&list_box, &content_box, &state);
-                glib::Propagation::Stop
-            }
-            (gdk4::Key::E, true, true) => {
-                if let Some(workspace) = lock_or_recover(&state.shared.tab_manager).selected_mut() {
-                    workspace.split(SplitOrientation::Vertical, PanelType::Terminal);
-                }
-                refresh_ui(&list_box, &content_box, &state);
-                glib::Propagation::Stop
-            }
-            (gdk4::Key::U, true, true) => {
-                if select_latest_unread(&state) {
-                    refresh_ui(&list_box, &content_box, &state);
-                }
-                glib::Propagation::Stop
-            }
-            _ => glib::Propagation::Proceed,
-        }
-    });
-
-    window.add_controller(controller);
 }
 
 fn install_css() {

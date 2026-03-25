@@ -13,7 +13,7 @@ repository = "https://github.com/manaflow-ai/cmux"
 [workspace.dependencies]
 # GTK4 / libadwaita (versions matched to vte4 0.10)
 gtk4 = { version = "0.11", features = ["v4_6"] }
-libadwaita = { version = "0.9", features = ["v1_4", "gtk_v4_6"] }
+libadwaita = { version = "0.9", features = ["v1_5", "gtk_v4_6"] }
 glib = "0.22"
 gdk4 = { version = "0.11", features = ["v4_6"] }
 gio = "0.22"
