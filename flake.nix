@@ -35,6 +35,7 @@
           openssl
           vte-gtk4
           webkitgtk_6_0
+          glib-networking
         ];
 
         meta = with pkgs.lib; {
