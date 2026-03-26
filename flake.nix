@@ -17,7 +17,7 @@
         inherit pname version;
         src = ./.;
 
-        cargoHash = "sha256-X9jIXBx6HlpUyoh/wPxW5bj7G9EkmNzyHu3jikpw4/U=";
+        cargoHash = "sha256-8eEFwFy/IEmK088dyVAzZuFKj8vH4PiEjtZCCz8REro=";
 
         nativeBuildInputs = with pkgs; [
           pkg-config
@@ -34,6 +34,7 @@
           graphene
           openssl
           vte-gtk4
+          webkitgtk_6_0
         ];
 
         meta = with pkgs.lib; {
