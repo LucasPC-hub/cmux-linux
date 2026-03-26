@@ -7,6 +7,7 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 use tokio::sync::mpsc::UnboundedReceiver;
 use vte4::prelude::*;
+use webkit6::prelude::*;
 
 use crate::app::{lock_or_recover, AppState, UiEvent};
 use crate::model::panel::SplitOrientation;
@@ -105,6 +106,7 @@ fn build_app_menu() -> gio::Menu {
     let pane_section = gio::Menu::new();
     pane_section.append(Some("Split Right"), Some("win.split-right"));
     pane_section.append(Some("Split Down"), Some("win.split-down"));
+    pane_section.append(Some("Split Browser Right"), Some("win.split-browser-right"));
     pane_section.append(Some("Close Pane"), Some("win.close-pane"));
     menu.append_section(Some("Panes"), &pane_section);
 
@@ -210,6 +212,13 @@ fn install_actions(
     add_action!("split-down", "<Ctrl><Shift>e", |state: &Rc<AppState>, lb: &gtk4::ListBox, cb: &gtk4::Box| {
         if let Some(workspace) = lock_or_recover(&state.shared.tab_manager).selected_mut() {
             workspace.split(SplitOrientation::Vertical, PanelType::Terminal);
+        }
+        refresh_ui(lb, cb, state);
+    });
+
+    add_action!("split-browser-right", "<Ctrl><Shift>b", |state: &Rc<AppState>, lb: &gtk4::ListBox, cb: &gtk4::Box| {
+        if let Some(workspace) = lock_or_recover(&state.shared.tab_manager).selected_mut() {
+            workspace.split(SplitOrientation::Horizontal, PanelType::Browser);
         }
         refresh_ui(lb, cb, state);
     });
@@ -483,6 +492,37 @@ fn bind_shared_state_updates(
                                 %panel_id,
                                 "surface.send_input dropped because panel is not ready"
                             );
+                        }
+                    }
+                    UiEvent::BrowserOpen { panel_id, url } => {
+                        let webview = state.browser_for(panel_id, Some(&url));
+                        webkit6::prelude::WebViewExt::load_uri(&webview, &url);
+                        needs_refresh = true;
+                    }
+                    UiEvent::BrowserBack { panel_id } => {
+                        if let Some(wv) = state.browser_cache.borrow().get(&panel_id) {
+                            if webkit6::prelude::WebViewExt::can_go_back(wv) {
+                                webkit6::prelude::WebViewExt::go_back(wv);
+                            }
+                        }
+                    }
+                    UiEvent::BrowserForward { panel_id } => {
+                        if let Some(wv) = state.browser_cache.borrow().get(&panel_id) {
+                            if webkit6::prelude::WebViewExt::can_go_forward(wv) {
+                                webkit6::prelude::WebViewExt::go_forward(wv);
+                            }
+                        }
+                    }
+                    UiEvent::BrowserReload { panel_id } => {
+                        if let Some(wv) = state.browser_cache.borrow().get(&panel_id) {
+                            webkit6::prelude::WebViewExt::reload(wv);
+                        }
+                    }
+                    UiEvent::BrowserDevTools { panel_id } => {
+                        if let Some(wv) = state.browser_cache.borrow().get(&panel_id) {
+                            if let Some(inspector) = webkit6::prelude::WebViewExt::inspector(wv) {
+                                inspector.show();
+                            }
                         }
                     }
                 }

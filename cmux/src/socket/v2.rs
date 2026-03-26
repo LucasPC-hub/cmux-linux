@@ -106,6 +106,13 @@ pub fn dispatch(json_line: &str, state: &Arc<SharedState>) -> Response {
         // Surface commands
         "surface.send_input" => handle_surface_send_input(id, &req.params, state),
 
+        // Browser commands
+        "browser.open" => handle_browser_open(id, &req.params, state),
+        "browser.back" => handle_browser_navigate(id, &req.params, state, "back"),
+        "browser.forward" => handle_browser_navigate(id, &req.params, state, "forward"),
+        "browser.reload" => handle_browser_navigate(id, &req.params, state, "reload"),
+        "browser.devtools" => handle_browser_navigate(id, &req.params, state, "devtools"),
+
         // Notification commands
         "notification.create" => handle_notification_create(id, &req.params, state),
 
@@ -143,6 +150,11 @@ fn handle_capabilities(id: Value) -> Response {
         "workspace.append_log",
         "pane.new",
         "surface.send_input",
+        "browser.open",
+        "browser.back",
+        "browser.forward",
+        "browser.reload",
+        "browser.devtools",
         "notification.create",
     ];
     Response::success(id, serde_json::json!({"methods": methods}))
@@ -610,6 +622,106 @@ fn handle_surface_send_input(id: Value, params: &Value, state: &Arc<SharedState>
             "surface": panel_id.to_string(),
         }),
     )
+}
+
+// -----------------------------------------------------------------------
+// Browser handlers
+// -----------------------------------------------------------------------
+
+fn handle_browser_open(id: Value, params: &Value, state: &Arc<SharedState>) -> Response {
+    let url = match params.get("url").and_then(|v| v.as_str()) {
+        Some(u) => u.to_string(),
+        None => return Response::error(id, "missing_param", "Missing required param: url"),
+    };
+
+    // Find or create a browser panel in the current workspace
+    let panel_id = {
+        let mut tab_manager = lock_or_recover(&state.tab_manager);
+        let workspace = match tab_manager.selected_mut() {
+            Some(ws) => ws,
+            None => return Response::error(id, "no_workspace", "No workspace selected"),
+        };
+
+        // Look for existing browser panel
+        let existing = workspace
+            .panels
+            .values()
+            .find(|p| p.panel_type == crate::model::PanelType::Browser)
+            .map(|p| p.id);
+
+        if let Some(panel_id) = existing {
+            panel_id
+        } else {
+            // Create a new browser panel via split
+            let panel = crate::model::panel::Panel::new_browser();
+            let panel_id = panel.id;
+            workspace.panels.insert(panel_id, panel);
+            workspace.layout = workspace
+                .layout
+                .clone()
+                .split(crate::model::panel::SplitOrientation::Horizontal, panel_id);
+            panel_id
+        }
+    };
+
+    state.send_ui_event(UiEvent::BrowserOpen {
+        panel_id,
+        url: url.clone(),
+    });
+    state.notify_ui_refresh();
+
+    Response::success(
+        id,
+        serde_json::json!({
+            "panel_id": panel_id.to_string(),
+            "url": url,
+        }),
+    )
+}
+
+fn handle_browser_navigate(
+    id: Value,
+    params: &Value,
+    state: &Arc<SharedState>,
+    action: &str,
+) -> Response {
+    let panel_id = match params
+        .get("panel_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<uuid::Uuid>().ok())
+    {
+        Some(id) => id,
+        None => {
+            // Try to find the first browser panel in current workspace
+            let tab_manager = lock_or_recover(&state.tab_manager);
+            match tab_manager
+                .selected()
+                .and_then(|ws| {
+                    ws.panels
+                        .values()
+                        .find(|p| p.panel_type == crate::model::PanelType::Browser)
+                        .map(|p| p.id)
+                })
+            {
+                Some(id) => id,
+                None => {
+                    return Response::error(id, "no_browser", "No browser panel found")
+                }
+            }
+        }
+    };
+
+    let event = match action {
+        "back" => UiEvent::BrowserBack { panel_id },
+        "forward" => UiEvent::BrowserForward { panel_id },
+        "reload" => UiEvent::BrowserReload { panel_id },
+        "devtools" => UiEvent::BrowserDevTools { panel_id },
+        _ => return Response::error(id, "unknown_action", "Unknown browser action"),
+    };
+
+    state.send_ui_event(event);
+
+    Response::success(id, serde_json::json!({"ok": true}))
 }
 
 // -----------------------------------------------------------------------

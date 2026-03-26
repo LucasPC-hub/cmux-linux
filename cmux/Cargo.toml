@@ -24,4 +24,5 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+webkit6 = { workspace = true }
 libc = "0.2"

@@ -29,6 +29,7 @@ use uuid::Uuid;
 pub struct AppState {
     pub shared: Arc<SharedState>,
     pub terminal_cache: RefCell<HashMap<Uuid, vte4::Terminal>>,
+    pub browser_cache: RefCell<HashMap<Uuid, webkit6::WebView>>,
 }
 
 impl AppState {
@@ -36,6 +37,7 @@ impl AppState {
         Self {
             shared,
             terminal_cache: RefCell::new(HashMap::new()),
+            browser_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -100,6 +102,57 @@ impl AppState {
         terminal
     }
 
+    pub fn browser_for(
+        &self,
+        panel_id: Uuid,
+        url: Option<&str>,
+    ) -> webkit6::WebView {
+        if let Some(webview) = self.browser_cache.borrow().get(&panel_id) {
+            return webview.clone();
+        }
+
+        let webview = webkit6::WebView::new();
+        webview.set_hexpand(true);
+        webview.set_vexpand(true);
+
+        // Enable developer extras
+        let settings = webkit6::prelude::WebViewExt::settings(&webview);
+        if let Some(settings) = settings {
+            settings.set_enable_developer_extras(true);
+            settings.set_javascript_can_access_clipboard(true);
+        }
+
+        // Load URL if provided
+        if let Some(url) = url {
+            webkit6::prelude::WebViewExt::load_uri(&webview, url);
+        }
+
+        // Track page title changes
+        {
+            let shared = self.shared.clone();
+            let pid = panel_id;
+            webkit6::prelude::WebViewExt::connect_title_notify(&webview, move |wv: &webkit6::WebView| {
+                let title: Option<glib::GString> = webkit6::prelude::WebViewExt::title(wv);
+                if let Some(title) = title {
+                    let title_str = title.to_string();
+                    if !title_str.is_empty() {
+                        let mut tab_manager = lock_or_recover(&shared.tab_manager);
+                        if let Some(ws) = tab_manager.find_workspace_with_panel_mut(pid) {
+                            ws.process_title = title_str;
+                        }
+                        drop(tab_manager);
+                        shared.notify_ui_refresh();
+                    }
+                }
+            });
+        }
+
+        self.browser_cache
+            .borrow_mut()
+            .insert(panel_id, webview.clone());
+        webview
+    }
+
     pub fn send_input_to_panel(&self, panel_id: Uuid, text: &str) -> bool {
         let terminal = if let Some(terminal) = self.terminal_cache.borrow().get(&panel_id).cloned()
         {
@@ -141,25 +194,36 @@ impl AppState {
         }
 
         self.terminal_cache.borrow_mut().remove(&panel_id);
+        self.browser_cache.borrow_mut().remove(&panel_id);
         self.shared.notify_ui_refresh();
-        tracing::debug!(%panel_id, process_alive, "closed terminal panel");
+        tracing::debug!(%panel_id, process_alive, "closed panel");
         true
     }
 
     pub fn prune_terminal_cache(&self) {
-        let live_panels: HashSet<Uuid> = {
+        let (live_terminals, live_browsers): (HashSet<Uuid>, HashSet<Uuid>) = {
             let tab_manager = lock_or_recover(&self.shared.tab_manager);
-            tab_manager
+            let all_panels: Vec<_> = tab_manager
                 .iter()
                 .flat_map(|workspace| workspace.panels.values())
-                .filter(|panel| panel.panel_type == crate::model::PanelType::Terminal)
-                .map(|panel| panel.id)
-                .collect()
+                .collect();
+            let terminals = all_panels.iter()
+                .filter(|p| p.panel_type == crate::model::PanelType::Terminal)
+                .map(|p| p.id)
+                .collect();
+            let browsers = all_panels.iter()
+                .filter(|p| p.panel_type == crate::model::PanelType::Browser)
+                .map(|p| p.id)
+                .collect();
+            (terminals, browsers)
         };
 
         self.terminal_cache
             .borrow_mut()
-            .retain(|panel_id, _| live_panels.contains(panel_id));
+            .retain(|panel_id, _| live_terminals.contains(panel_id));
+        self.browser_cache
+            .borrow_mut()
+            .retain(|panel_id, _| live_browsers.contains(panel_id));
     }
 }
 
@@ -168,6 +232,11 @@ impl AppState {
 pub enum UiEvent {
     Refresh,
     SendInput { panel_id: Uuid, text: String },
+    BrowserOpen { panel_id: Uuid, url: String },
+    BrowserBack { panel_id: Uuid },
+    BrowserForward { panel_id: Uuid },
+    BrowserReload { panel_id: Uuid },
+    BrowserDevTools { panel_id: Uuid },
 }
 
 /// Thread-safe state shared between GTK main thread and socket server.
