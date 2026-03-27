@@ -223,6 +223,13 @@ fn install_actions(
         refresh_ui(lb, cb, state);
     });
 
+    add_action!("split-browser-down", "<Ctrl><Shift>n", |state: &Rc<AppState>, lb: &gtk4::ListBox, cb: &gtk4::Box| {
+        if let Some(workspace) = lock_or_recover(&state.shared.tab_manager).selected_mut() {
+            workspace.split(SplitOrientation::Vertical, PanelType::Browser);
+        }
+        refresh_ui(lb, cb, state);
+    });
+
     // --- Terminal actions (operate on focused VTE terminal) ---
     {
         let action = SimpleAction::new("copy", None);

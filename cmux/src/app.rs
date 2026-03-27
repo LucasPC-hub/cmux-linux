@@ -55,6 +55,33 @@ impl AppState {
         terminal.set_vexpand(true);
         terminal.set_scrollback_lines(10000);
 
+        // Terminal color palette (Ghostty-style dark theme)
+        let parse = |hex: &str| -> gdk4::RGBA {
+            gdk4::RGBA::parse(hex).unwrap()
+        };
+        let fg = parse("#c0caf5");
+        let bg = parse("#1a1b26");
+        let palette = [
+            parse("#15161e"), // black
+            parse("#f7768e"), // red
+            parse("#9ece6a"), // green
+            parse("#e0af68"), // yellow
+            parse("#7aa2f7"), // blue
+            parse("#bb9af7"), // magenta
+            parse("#7dcfff"), // cyan
+            parse("#a9b1d6"), // white
+            parse("#414868"), // bright black
+            parse("#f7768e"), // bright red
+            parse("#9ece6a"), // bright green
+            parse("#e0af68"), // bright yellow
+            parse("#7aa2f7"), // bright blue
+            parse("#bb9af7"), // bright magenta
+            parse("#7dcfff"), // bright cyan
+            parse("#c0caf5"), // bright white
+        ];
+        let palette_refs: Vec<&gdk4::RGBA> = palette.iter().collect();
+        terminal.set_colors(Some(&fg), Some(&bg), &palette_refs);
+
         // Track terminal title changes → update workspace process_title
         {
             let shared = self.shared.clone();
